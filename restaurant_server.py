@@ -1,9 +1,11 @@
 import os
 import sqlite3
 from datetime import date as calendar_date
+from typing import Annotated
 from uuid import uuid4
 
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field
 
 NAME = "Pasta Palace"
 TIMES = ("17:00", "17:30", "18:00", "18:30", "19:00", "19:30", "20:00", "20:30")
@@ -39,8 +41,19 @@ def valid(date: str, party_size: int) -> str | None:
 
 
 @mcp.tool()
-def search_slots(date: str, party_size: int) -> dict:
-    """Find available times for a date (YYYY-MM-DD) and party size (1–10)."""
+def search_slots(
+    date: Annotated[str, Field(description="Reservation date in YYYY-MM-DD format, for example 2026-10-10. Past dates are rejected.")],
+    party_size: Annotated[int, Field(description="Number of guests, from 1 through 10.")],
+) -> dict:
+    """Search available tables at Pasta Palace without making a booking.
+
+    Use this when a guest wants to see options for a date and party size.
+    Returns available_slots as 24-hour HH:MM strings, between 17:00 and
+    20:30 in 30-minute steps. Availability can change before booking, so
+    book_reservation may still reject a slot. This demo has one table per
+    date and time; party size is validated but does not change capacity.
+    Returns success=false with error for invalid inputs.
+    """
     if error := valid(date, party_size):
         return {"success": False, "error": error}
     with connect() as db:
@@ -51,8 +64,21 @@ def search_slots(date: str, party_size: int) -> dict:
 
 
 @mcp.tool()
-def book_reservation(date: str, time: str, party_size: int, guest_name: str) -> dict:
-    """Book a table. Requires date, 24-hour time, party size, and guest name."""
+def book_reservation(
+    date: Annotated[str, Field(description="Reservation date in YYYY-MM-DD format; use the same date shown to the guest.")],
+    time: Annotated[str, Field(description="One offered time in 24-hour HH:MM format, such as 19:00. Offered every 30 minutes from 17:00 through 20:30.")],
+    party_size: Annotated[int, Field(description="Number of guests, from 1 through 10.")],
+    guest_name: Annotated[str, Field(description="Name to place on the reservation, 1 to 100 characters after trimming; blank names are rejected.")],
+) -> dict:
+    """Create a confirmed reservation at Pasta Palace.
+
+    This changes state. Call only when the guest has chosen a specific date,
+    time, party size, and name and asked to book. A prior search is useful
+    but not required. Only one confirmed reservation can occupy a date/time;
+    if another booking wins, returns success=false and an error. On success,
+    return the reservation details and reservation_id to the guest. Keep that
+    ID for lookup or cancellation. Times have no timezone conversion.
+    """
     if error := valid(date, party_size):
         return {"success": False, "error": error}
     if time not in TIMES:
@@ -75,8 +101,15 @@ def book_reservation(date: str, time: str, party_size: int, guest_name: str) -> 
 
 
 @mcp.tool()
-def get_reservation(reservation_id: str) -> dict:
-    """Look up a reservation by its confirmation ID."""
+def get_reservation(
+    reservation_id: Annotated[str, Field(description="The reservation_id UUID returned by book_reservation.")],
+) -> dict:
+    """Retrieve one reservation without changing it.
+
+    Use the exact reservation_id from a prior booking. Returns its guest
+    name, date, time, party size, and status (confirmed or cancelled).
+    Returns success=false with error if the ID does not exist.
+    """
     with connect() as db:
         row = db.execute("SELECT * FROM reservations WHERE reservation_id = ?",
                          (reservation_id,)).fetchone()
@@ -86,8 +119,17 @@ def get_reservation(reservation_id: str) -> dict:
 
 
 @mcp.tool()
-def cancel_reservation(reservation_id: str) -> dict:
-    """Cancel a reservation by its confirmation ID."""
+def cancel_reservation(
+    reservation_id: Annotated[str, Field(description="The reservation_id UUID returned by book_reservation; not a date or guest name.")],
+) -> dict:
+    """Cancel a confirmed reservation and free its date/time slot.
+
+    This changes state. Call only when the guest asks to cancel the booking
+    identified by reservation_id. On success, returns the reservation with
+    status=cancelled. An unknown ID or an already cancelled reservation
+    returns success=false with an error. Cancellation cannot be undone; a
+    new booking is required to reserve the slot again.
+    """
     with connect() as db:
         changed = db.execute("""UPDATE reservations SET status = 'cancelled'
             WHERE reservation_id = ? AND status = 'confirmed'""", (reservation_id,)).rowcount
